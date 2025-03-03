@@ -25,8 +25,12 @@ def should_match(content, keyword):
         # 字母关键词：不区分大小写
         return processed_content.lower() == keyword.lower()
     return processed_content == keyword
+
 def parse_timestamps(folder_path, keyword):
-    """解析所有XML文件，提取指定关键词弹幕的时间戳和来源文件"""
+    """
+    解析所有XML文件，提取指定关键词弹幕的时间戳和来源文件，
+    同时额外保存第一条弹幕的p属性的第一个数据（一般为视频内秒数）
+    """
     times = []
     
     for filename in os.listdir(folder_path):
@@ -55,7 +59,9 @@ def parse_timestamps(folder_path, keyword):
 
             try:
                 timestamp = int(attrs[4])
-                times.append((timestamp, filename))
+                # 提取p属性的第一个数据，通常为视频播放时长（秒数）
+                first_p = attrs[0]
+                times.append((timestamp, filename, first_p))
             except ValueError:
                 continue
 
@@ -75,34 +81,36 @@ def find_peak_windows(times, window_sec=60):
         while times[right][0] - times[left][0] > window_ms:
             left += 1
         
-        # 统计当前窗口
+        # 统计当前窗口内的弹幕数量
         count = right - left + 1
         if count > 0:
-            # 记录窗口信息和来源文件
+            # 记录窗口信息和来源文件统计
             source_files = defaultdict(int)
             for i in range(left, right + 1):
                 source_files[times[i][1]] += 1
+            
+            # 保存窗口中第一条弹幕的p属性第一个数据（视频内秒数）
+            first_video_time = times[left][2]
             
             windows.append({
                 'count': count,
                 'start': times[left][0],
                 'end': times[right][0],
-                'sources': source_files
+                'sources': source_files,
+                'first_video_time': first_video_time
             })
 
-    # 按密度排序
+    # 按密度（弹幕数量）排序
     windows.sort(reverse=True, key=lambda x: x['count'])
     
     # 选择非重叠的Top10窗口
     selected = []
     for win in windows:
-        # 检查与已选窗口的重叠
         overlap = False
         for selected_win in selected:
             if win['start'] < selected_win['end'] and win['end'] > selected_win['start']:
                 overlap = True
                 break
-                
         if not overlap:
             selected.append(win)
             if len(selected) >= 10:
@@ -110,16 +118,30 @@ def find_peak_windows(times, window_sec=60):
 
     return selected
 
+def convert_seconds_to_hms(seconds_val):
+    """将秒数转换为时:分:秒格式"""
+    try:
+        seconds_val = float(seconds_val)
+    except ValueError:
+        return "Invalid"
+    hours = int(seconds_val // 3600)
+    minutes = int((seconds_val % 3600) // 60)
+    seconds = int(seconds_val % 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
 def format_result(selected_windows, keyword):
     """格式化输出结果"""
     results = []
     for idx, win in enumerate(selected_windows[:10], 1):
-        # 计算中点时间（东八区）
+        # 计算密集窗口的中点时间（东八区）
         midpoint = (win['start'] + win['end']) // 2
         dt = datetime.fromtimestamp(midpoint / 1000, tz=timezone.utc) + timedelta(hours=8)
         formatted_time = dt.strftime('%Y-%m-%d %H:%M:%S CST')
 
-        # 处理来源文件
+        # 转换第一条弹幕p属性的第一个秒数为时分秒格式
+        first_comment_hms = convert_seconds_to_hms(win['first_video_time'])
+
+        # 处理来源文件信息
         source_files = sorted(win['sources'].items(), key=lambda x: x[1], reverse=True)
         source_info = "\n       ".join([f"{fname} ({count}条)" for fname, count in source_files])
 
@@ -129,7 +151,8 @@ def format_result(selected_windows, keyword):
             'count': win['count'],
             'start': win['start'],
             'end': win['end'],
-            'sources': source_info
+            'sources': source_info,
+            'first_comment_video_time': first_comment_hms  # 新增输出参数
         })
     return results
 
@@ -137,8 +160,8 @@ if __name__ == "__main__":
     # 配置参数
     CONFIG = {
         'folder_path': "./xml",           # XML文件夹路径
-        'keyword': "kksk",                # 要分析的弹幕关键词 也可以用 “两眼一黑” “？” 查找怪话时刻
-        'window_sec': 120                  # 检测窗口大小（秒）
+        'keyword': "kksk",                # 要分析的弹幕关键词，也可以用 “两眼一黑”、“？” 等查找特定时刻
+        'window_sec': 60                 # 检测窗口大小（秒）
     }
 
     print(f"正在分析弹幕关键词: {CONFIG['keyword']}")
@@ -160,4 +183,5 @@ if __name__ == "__main__":
             print(f"   弹幕数量: {item['count']}条")
             print(f"   时间范围: {item['start']} - {item['end']}")
             print(f"   来源文件:\n       {item['sources']}")
+            print(f"   第一条弹幕视频时间: {item['first_comment_video_time']}")
             print("-" * 80)
